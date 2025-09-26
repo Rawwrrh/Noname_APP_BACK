@@ -44,22 +44,24 @@ const ANIMAL_RELATED_TAGS = [
 
 // Endpoint para ANALIZAR la imagen (se mantiene igual)
 app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
-    // ... (lógica para llamar a Rekognition se mantiene igual)
-    const response = await rekognitionClient.send(command);
-
-    // ===> 2. FILTRAMOS LAS ETIQUETAS ANTES DE DEVOLVERLAS <===
-    const relevantLabels = response.Labels.filter(label => 
-        ANIMAL_RELATED_TAGS.includes(label.Name) || 
-        label.Parents.some(parent => ANIMAL_RELATED_TAGS.includes(parent.Name))
-    ).map(label => ({ 
-        name: label.Name, 
-        confidence: label.Confidence.toFixed(2) 
-    }));
+    if (!req.file) return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
     
-    console.log("Análisis de Rekognition (SOLO ETIQUETAS RELEVANTES):", relevantLabels);
-    res.status(200).json({ message: 'Análisis completado con éxito.', labels: relevantLabels });
+    try {
+        const params = { Image: { Bytes: req.file.buffer }, MaxLabels: 10, MinConfidence: 75 };
+        
+        // ===> LA LÍNEA QUE FALTABA ESTÁ AQUÍ <===
+        const command = new DetectLabelsCommand(params);
+        
+        const response = await rekognitionClient.send(command);
+        const labels = response.Labels.map(label => ({ name: label.Name, confidence: label.Confidence.toFixed(2) }));
+        
+        console.log("Análisis de Rekognition completado:", labels);
+        res.status(200).json({ message: 'Análisis completado con éxito.', labels });
+    } catch (error) {
+        console.error("Error al analizar la imagen:", error);
+        res.status(500).json({ error: 'Error en el servidor al analizar la imagen.' });
+    }
 });
-
 // ==========================================================
 // === NUEVO ENDPOINT PARA CREAR UN POST Y ANALIZAR LA IMAGEN ===
 // ==========================================================
