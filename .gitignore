@@ -1,0 +1,11 @@
+# Dependencias
+node_modules
+
+# Archivos de entorno (contiene tus secretos de AWS y Appwrite)
+.env
+
+# Logs y archivos del sistema
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
