@@ -179,7 +179,7 @@ app.post('/api/search-by-tags', async (req, res) => {
         const promise = await databases.listDocuments(
             process.env.APPWRITE_DATABASE_ID,
             process.env.APPWRITE_POST_COLLECTION_ID,
-            [ Query.search('ai_tags', searchTerms.join(' ')) ] // Query.search busca en arrays de strings
+            [ Query.equal('ai_tags', searchTerms) ] // Query.search busca en arrays de strings
         );
 
         const initialResults = promise.documents;
