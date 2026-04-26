@@ -171,49 +171,53 @@ app.post('/api/search-by-tags', async (req, res) => {
     return res.status(400).json({ error: 'No se proporcionaron etiquetas.' });
   }
 
-  const searchTerms = labels.map(label => label.name);
-  console.log('Buscando mascotas con los términos:', searchTerms);
+  const searchTerms = labels.map(label => label.name.toLowerCase());
+  console.log('Buscando con términos:', searchTerms);
 
   try {
-    // Appwrite no soporta OR en Query.equal sobre arrays.
-    // Solución: una query por término, luego deduplicar y puntuar.
-    const resultsMap = new Map(); // postId → { post, matchCount }
+    // Traemos todos los posts (en lotes de 100, límite de Appwrite)
+    let allPosts = [];
+    let lastId = null;
+    let keepFetching = true;
 
-    await Promise.all(
-      searchTerms.map(async (term) => {
-        try {
-          const response = await databases.listDocuments(
-            process.env.APPWRITE_DATABASE_ID,
-            process.env.APPWRITE_POST_COLLECTION_ID,
-            [Query.contains('ai_tags', [term])]
-          );
-          response.documents.forEach(post => {
-            if (resultsMap.has(post.$id)) {
-              resultsMap.get(post.$id).matchCount++;
-            } else {
-              resultsMap.set(post.$id, { post, matchCount: 1 });
-            }
-          });
-        } catch (e) {
-          console.warn(`Query falló para término "${term}":`, e.message);
-        }
+    while (keepFetching) {
+      const queries = [Query.limit(100)];
+      if (lastId) queries.push(Query.cursorAfter(lastId));
+
+      const response = await databases.listDocuments(
+        process.env.APPWRITE_DATABASE_ID,
+        process.env.APPWRITE_POST_COLLECTION_ID,
+        queries
+      );
+
+      allPosts = allPosts.concat(response.documents);
+
+      if (response.documents.length < 100) {
+        keepFetching = false;
+      } else {
+        lastId = response.documents[response.documents.length - 1].$id;
+      }
+    }
+
+    console.log(`Total posts traídos: ${allPosts.length}`);
+
+    // Filtramos y puntuamos en el backend
+    const results = allPosts
+      .filter(post => Array.isArray(post.ai_tags) && post.ai_tags.length > 0)
+      .map(post => {
+        const postTags = post.ai_tags.map(t => t.toLowerCase());
+        const matchCount = searchTerms.filter(term => postTags.includes(term)).length;
+        return { ...post, relevance_score: Math.round((matchCount / searchTerms.length) * 100) };
       })
-    );
-
-    // Calcular relevancia y ordenar
-    const sorted = Array.from(resultsMap.values())
-      .map(({ post, matchCount }) => ({
-        ...post,
-        relevance_score: Math.round((matchCount / searchTerms.length) * 100),
-      }))
+      .filter(post => post.relevance_score > 0)
       .sort((a, b) => b.relevance_score - a.relevance_score);
 
-    console.log(`Resultados únicos encontrados: ${sorted.length}`);
-    res.status(200).json(sorted);
+    console.log(`Posts con coincidencias: ${results.length}`);
+    res.status(200).json(results);
 
   } catch (error) {
-    console.error('Error en search-by-tags:', error);
-    res.status(500).json({ error: 'Error interno durante la búsqueda.' });
+    console.error('Error en search-by-tags:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
