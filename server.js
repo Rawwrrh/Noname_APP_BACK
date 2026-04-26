@@ -165,49 +165,56 @@ app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (re
 
 // === NUEVO ENDPOINT PARA BUSCAR MASCOTAS POR ETIQUETAS DE IA ===
 app.post('/api/search-by-tags', async (req, res) => {
-    const { labels } = req.body; // Recibimos las etiquetas del frontend
+  const { labels } = req.body;
 
-    if (!labels || labels.length === 0) {
-        return res.status(400).json({ error: 'No se proporcionaron etiquetas para la búsqueda.' });
-    }
+  if (!labels || labels.length === 0) {
+    return res.status(400).json({ error: 'No se proporcionaron etiquetas.' });
+  }
 
-    const searchTerms = labels.map(label => label.name);
-    console.log('Buscando mascotas con los términos:', searchTerms);
+  const searchTerms = labels.map(label => label.name);
+  console.log('Buscando mascotas con los términos:', searchTerms);
 
-    try {
-        // 1. Buscamos en Appwrite todos los posts que contengan CUALQUIERA de las etiquetas.
-        const promise = await databases.listDocuments(
+  try {
+    // Appwrite no soporta OR en Query.equal sobre arrays.
+    // Solución: una query por término, luego deduplicar y puntuar.
+    const resultsMap = new Map(); // postId → { post, matchCount }
+
+    await Promise.all(
+      searchTerms.map(async (term) => {
+        try {
+          const response = await databases.listDocuments(
             process.env.APPWRITE_DATABASE_ID,
             process.env.APPWRITE_POST_COLLECTION_ID,
-            [ Query.equal('ai_tags', searchTerms) ] // Query.search busca en arrays de strings
-        );
+            [Query.contains('ai_tags', [term])]
+          );
+          response.documents.forEach(post => {
+            if (resultsMap.has(post.$id)) {
+              resultsMap.get(post.$id).matchCount++;
+            } else {
+              resultsMap.set(post.$id, { post, matchCount: 1 });
+            }
+          });
+        } catch (e) {
+          console.warn(`Query falló para término "${term}":`, e.message);
+        }
+      })
+    );
 
-        const initialResults = promise.documents;
-        console.log(`Appwrite encontró ${initialResults.length} resultados iniciales.`);
+    // Calcular relevancia y ordenar
+    const sorted = Array.from(resultsMap.values())
+      .map(({ post, matchCount }) => ({
+        ...post,
+        relevance_score: Math.round((matchCount / searchTerms.length) * 100),
+      }))
+      .sort((a, b) => b.relevance_score - a.relevance_score);
 
-        // 2. Calculamos la puntuación de relevancia manualmente
-        const scoredResults = initialResults.map(post => {
-            let matchCount = 0;
-            // Contamos cuántas de las etiquetas de búsqueda están en las ai_tags del post
-            searchTerms.forEach(term => {
-                if (post.ai_tags.includes(term)) {
-                    matchCount++;
-                }
-            });
-            const relevance_score = (matchCount / searchTerms.length) * 100; // Puntuación en porcentaje
-            return { ...post, relevance_score };
-        });
+    console.log(`Resultados únicos encontrados: ${sorted.length}`);
+    res.status(200).json(sorted);
 
-        // 3. Ordenamos los resultados por la puntuación de relevancia
-        const sortedResults = scoredResults.sort((a, b) => b.relevance_score - a.relevance_score);
-
-        // 4. Devolvemos los resultados ordenados al frontend
-        res.status(200).json(sortedResults);
-
-    } catch (error) {
-        console.error("Error al buscar en la base de datos de Appwrite:", error);
-        res.status(500).json({ error: 'Error interno del servidor durante la búsqueda.' });
-    }
+  } catch (error) {
+    console.error('Error en search-by-tags:', error);
+    res.status(500).json({ error: 'Error interno durante la búsqueda.' });
+  }
 });
 
 app.listen(PORT, () => {
