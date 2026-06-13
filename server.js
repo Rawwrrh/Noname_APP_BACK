@@ -12,7 +12,8 @@ const { InputFile } = require('node-appwrite/file');
 console.log({ Client, Databases, Query, ID, Storage, InputFile });
 
 const app = express();
-const PORT = 5000;
+// App Runner (y otros hosts) inyectan el puerto por env. En local cae a 5000.
+const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
@@ -503,6 +504,10 @@ app.post('/api/search-by-embedding', upload.single('image'), async (req, res) =>
   }
 });
 
+// Health check para App Runner (y monitoreo). Debe responder 200 rápido.
+app.get('/health', (req, res) => res.status(200).json({ status: 'ok' }));
+app.get('/', (req, res) => res.status(200).send('noname backend ok'));
+
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor backend escuchando en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor backend escuchando en el puerto ${PORT}`);
 });
