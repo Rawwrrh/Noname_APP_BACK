@@ -40,23 +40,87 @@ const ANIMAL_RELATED_TAGS = [
   'Siamese Cat', 'Persian Cat', 'Maine Coon', 'Tabby Cat'
 ];
 
+// Mapa a especie "canónica": permite saber si dos animales son del MISMO tipo.
+// Incluye términos en inglés (de Rekognition) y en español (campo `especie` de los posts).
+const SPECIES_MAP = {
+  dog: 'dog', puppy: 'dog', canine: 'dog',
+  cat: 'cat', kitten: 'cat', feline: 'cat',
+  rabbit: 'rabbit', bunny: 'rabbit', conejo: 'rabbit',
+  hamster: 'hamster',
+  bird: 'bird', ave: 'bird', pajaro: 'bird',
+  perro: 'dog', gato: 'cat',
+};
+
+// Colores básicos que devuelve Rekognition (SimplifiedColor) y que usamos como etiqueta.
+const COLOR_TAGS = new Set([
+  'black', 'white', 'gray', 'grey', 'brown', 'red', 'orange',
+  'yellow', 'green', 'blue', 'purple', 'pink', 'tan', 'cream', 'beige', 'gold', 'silver',
+]);
+
+// Devuelve la especie canónica encontrada en una lista de términos (o null).
+function canonicalSpecies(terms = []) {
+  for (const t of terms) {
+    const key = String(t).toLowerCase();
+    if (SPECIES_MAP[key]) return SPECIES_MAP[key];
+  }
+  return null;
+}
+
+// Llama a Rekognition UNA vez y devuelve labels (con parents) + colores dominantes.
+async function analyzeImage(buffer) {
+  const command = new DetectLabelsCommand({
+    Image: { Bytes: buffer },
+    MaxLabels: 15,
+    MinConfidence: 70,
+    Features: ['GENERAL_LABELS', 'IMAGE_PROPERTIES'],
+    Settings: { ImageProperties: { MaxDominantColors: 5 } },
+  });
+  const response = await rekognitionClient.send(command);
+
+  const labels = (response.Labels || []).map((l) => ({
+    name: l.Name,
+    confidence: Number((l.Confidence || 0).toFixed(2)),
+    parents: (l.Parents || []).map((p) => p.Name),
+  }));
+
+  const colors = (response.ImageProperties?.DominantColors || [])
+    .map((c) => (c.SimplifiedColor || '').toLowerCase())
+    .filter((c) => COLOR_TAGS.has(c));
+
+  return { labels, colors: [...new Set(colors)] };
+}
+
+// Construye los ai_tags normalizados (especie + raza + color) de una imagen analizada.
+function buildAiTags({ labels, colors }) {
+  const animal = labels
+    .filter(
+      (l) =>
+        ANIMAL_RELATED_TAGS.includes(l.name) ||
+        l.parents.some((p) => ANIMAL_RELATED_TAGS.includes(p))
+    )
+    .map((l) => l.name.toLowerCase());
+  return [...new Set([...animal, ...colors])];
+}
+
 // --- ENDPOINTS DE LA API ---
 
 // Endpoint para ANALIZAR la imagen (se mantiene igual)
 app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No se ha subido ningún archivo.' });
-    
+
     try {
-        const params = { Image: { Bytes: req.file.buffer }, MaxLabels: 10, MinConfidence: 75 };
-        
-        // ===> LA LÍNEA QUE FALTABA ESTÁ AQUÍ <===
-        const command = new DetectLabelsCommand(params);
-        
-        const response = await rekognitionClient.send(command);
-        const labels = response.Labels.map(label => ({ name: label.Name, confidence: label.Confidence.toFixed(2) }));
-        
-        console.log("Análisis de Rekognition completado:", labels);
-        res.status(200).json({ message: 'Análisis completado con éxito.', labels });
+        const { labels, colors } = await analyzeImage(req.file.buffer);
+
+        // Para la búsqueda reenviamos solo lo relevante (especie/raza/color), normalizado.
+        const aiTags = buildAiTags({ labels, colors });
+        const searchLabels = aiTags.map((name) => ({ name, confidence: 100 }));
+
+        console.log("Análisis de Rekognition completado:", { aiTags, colors });
+        res.status(200).json({
+            message: 'Análisis completado con éxito.',
+            labels: searchLabels, // mismo formato que antes: [{ name, confidence }]
+            colors,
+        });
     } catch (error) {
         console.error("Error al analizar la imagen:", error);
         res.status(500).json({ error: 'Error en el servidor al analizar la imagen.' });
@@ -73,17 +137,10 @@ app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (re
         }
 
         console.log("Analizando imagen de la nueva publicación...");
-        const params = { Image: { Bytes: imageFile.buffer }, MaxLabels: 10, MinConfidence: 75 };
-        const command = new DetectLabelsCommand(params);
-        const rekognitionResponse = await rekognitionClient.send(command);
-        const ai_tags = rekognitionResponse.Labels
-        .filter(label => 
-            ANIMAL_RELATED_TAGS.includes(label.Name) || 
-            label.Parents.some(parent => ANIMAL_RELATED_TAGS.includes(parent.Name))
-        )
-        .map(label => label.Name);
+        const { labels, colors } = await analyzeImage(imageFile.buffer);
+        const ai_tags = buildAiTags({ labels, colors });
 
-       console.log("Etiquetas de IA generadas (SOLO RELEVANTES):", ai_tags);
+       console.log("Etiquetas de IA generadas (especie/raza/color):", ai_tags);
 
         // --- Subir la imagen a Appwrite Storage ---
         console.log("Subiendo imagen a Appwrite Storage...");
@@ -165,14 +222,20 @@ app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (re
 
 // === NUEVO ENDPOINT PARA BUSCAR MASCOTAS POR ETIQUETAS DE IA ===
 app.post('/api/search-by-tags', async (req, res) => {
-  const { labels } = req.body;
+  // `targetStatuses` (opcional): p.ej. ["perdido","vista"] para comparar una foto
+  // de "encontrado" SOLO contra reportes de mascotas perdidas.
+  const { labels, targetStatuses } = req.body;
 
   if (!labels || labels.length === 0) {
     return res.status(400).json({ error: 'No se proporcionaron etiquetas.' });
   }
 
-  const searchTerms = labels.map(label => label.name.toLowerCase());
-  console.log('Buscando con términos:', searchTerms);
+  // Clasificamos los términos buscados en especie / color / raza-otros.
+  const terms = [...new Set(labels.map((l) => String(l.name).toLowerCase()))];
+  const searchedSpecies = canonicalSpecies(terms);
+  const searchedColors = terms.filter((t) => COLOR_TAGS.has(t));
+  const searchedBreeds = terms.filter((t) => !COLOR_TAGS.has(t) && !SPECIES_MAP[t]);
+  console.log('Buscando →', { searchedSpecies, searchedBreeds, searchedColors });
 
   try {
     // Traemos todos los posts (en lotes de 100, límite de Appwrite)
@@ -201,15 +264,47 @@ app.post('/api/search-by-tags', async (req, res) => {
 
     console.log(`Total posts traídos: ${allPosts.length}`);
 
-    // Filtramos y puntuamos en el backend
+    // Puntuación ponderada: especie pesa fuerte, raza media, color bajo.
     const results = allPosts
-      .filter(post => Array.isArray(post.ai_tags) && post.ai_tags.length > 0)
-      .map(post => {
-        const postTags = post.ai_tags.map(t => t.toLowerCase());
-        const matchCount = searchTerms.filter(term => postTags.includes(term)).length;
-        return { ...post, relevance_score: Math.round((matchCount / searchTerms.length) * 100) };
+      .map((post) => {
+        const tags = Array.isArray(post.ai_tags)
+          ? post.ai_tags.map((t) => String(t).toLowerCase())
+          : [];
+        // Especie del post: priorizamos el campo `especie` (dueño) y caemos a los ai_tags.
+        const postSpecies = canonicalSpecies([
+          String(post.especie || '').toLowerCase(),
+          ...tags,
+        ]);
+
+        // GATE por especie: si ambas se conocen y son distintas, no es coincidencia.
+        if (searchedSpecies && postSpecies && searchedSpecies !== postSpecies) {
+          return { ...post, relevance_score: 0 };
+        }
+
+        const postColors = tags.filter((t) => COLOR_TAGS.has(t));
+        const postBreeds = tags.filter((t) => !COLOR_TAGS.has(t) && !SPECIES_MAP[t]);
+
+        const breedMatches = searchedBreeds.filter((b) => postBreeds.includes(b)).length;
+        const colorMatches = searchedColors.filter((c) => postColors.includes(c)).length;
+
+        let score = 0;
+        if (searchedSpecies && postSpecies && searchedSpecies === postSpecies) score += 50;
+        score += Math.min(breedMatches * 15, 30); // hasta +30 por raza/rasgos
+        score += Math.min(colorMatches * 10, 20);  // hasta +20 por color
+
+        return { ...post, relevance_score: Math.min(score, 100) };
       })
-      .filter(post => post.relevance_score > 0)
+      .filter((post) => {
+        if (post.relevance_score <= 0) return false;
+        // Filtro opcional por estado (tags[0] guarda "perdido"/"encontrado"/...).
+        if (Array.isArray(targetStatuses) && targetStatuses.length) {
+          const status = Array.isArray(post.tags)
+            ? String(post.tags[0]).toLowerCase()
+            : '';
+          return targetStatuses.includes(status);
+        }
+        return true;
+      })
       .sort((a, b) => b.relevance_score - a.relevance_score);
 
     console.log(`Posts con coincidencias: ${results.length}`);
