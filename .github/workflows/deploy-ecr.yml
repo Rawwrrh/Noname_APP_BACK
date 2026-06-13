@@ -1,11 +1,11 @@
 name: Build and push to ECR
 
-# Cada push a main: GitHub construye la imagen Docker y la sube a ECR.
-# No necesitas Docker en tu PC (el runner de GitHub ya lo trae).
+# NOTA: este workflow quedó solo en modo manual (workflow_dispatch) porque la
+# cuenta de GitHub tiene Actions bloqueado por facturación. Mientras tanto el
+# build se hace por AWS CodeBuild (ver buildspec.yml). Si desbloqueas Actions,
+# puedes volver a activar el trigger de push.
 on:
-  push:
-    branches: [main]
-  workflow_dispatch: {} # permite lanzarlo a mano desde la pestaña Actions
+  workflow_dispatch: {} # solo manual desde la pestaña Actions
 
 env:
   AWS_REGION: us-east-1

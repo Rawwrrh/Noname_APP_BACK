@@ -1,0 +1,27 @@
+# Instrucciones de build para AWS CodeBuild.
+# Construye la imagen Docker del backend y la sube a ECR (repo: noname-backend).
+# Requiere que el proyecto de CodeBuild tenga "Privileged" activado (para Docker)
+# y que su rol de servicio pueda hacer push a ECR.
+version: 0.2
+
+env:
+  variables:
+    AWS_REGION: us-east-1
+    ECR_REPOSITORY: noname-backend
+
+phases:
+  pre_build:
+    commands:
+      - echo "Login a Amazon ECR..."
+      - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - REGISTRY=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY
+  build:
+    commands:
+      - echo "Construyendo la imagen..."
+      - docker build -t $REGISTRY/$ECR_REPOSITORY:latest .
+  post_build:
+    commands:
+      - echo "Subiendo la imagen a ECR..."
+      - docker push $REGISTRY/$ECR_REPOSITORY:latest
+      - echo "Listo: $REGISTRY/$ECR_REPOSITORY:latest"
