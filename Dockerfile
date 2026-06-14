@@ -1,5 +1,7 @@
 # Imagen de contenedor para el backend de noname (ECS Express Mode / cualquier host de contenedores)
-FROM node:18-alpine
+# Usamos el mirror oficial en Amazon ECR Public en vez de Docker Hub para evitar
+# el rate limit de pulls anónimos (429 toomanyrequests) en CodeBuild.
+FROM public.ecr.aws/docker/library/node:18-alpine
 
 # Carpeta de trabajo dentro del contenedor
 WORKDIR /app
