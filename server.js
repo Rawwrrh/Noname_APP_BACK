@@ -172,15 +172,42 @@ app.post('/api/analyze-image', upload.single('image'), async (req, res) => {
 // ==========================================================
 // === NUEVO ENDPOINT PARA CREAR UN POST Y ANALIZAR LA IMAGEN ===
 // ==========================================================
-app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (req, res) => {
+// Comunas de la Región del Biobío (MVP). Detecta la "zona" dentro del texto
+// libre de ubicación de Google Places para guardarla en el post. Debe quedar
+// alineado con el front (src/constants/biobioComunas.ts).
+const BIOBIO_COMUNAS = [
+    "Concepción", "Coronel", "Chiguayante", "Florida", "Hualpén", "Hualqui",
+    "Lota", "Penco", "San Pedro de la Paz", "Santa Juana", "Talcahuano", "Tomé",
+    "Los Ángeles", "Antuco", "Cabrero", "Laja", "Mulchén", "Nacimiento",
+    "Negrete", "Quilaco", "Quilleco", "San Rosendo", "Santa Bárbara",
+    "Tucapel", "Yumbel", "Alto Biobío",
+    "Lebu", "Arauco", "Cañete", "Contulmo", "Curanilahue", "Los Álamos", "Tirúa",
+];
+const _normComuna = (s) =>
+    s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().trim();
+const _COMUNA_LOOKUP = new Map(BIOBIO_COMUNAS.map((c) => [_normComuna(c), c]));
+function detectComuna(location) {
+    if (!location) return "";
+    for (const part of String(location).split(",")) {
+        // El reverse-geocode de Google pega el código postal a la comuna -> quitar dígitos.
+        const cleaned = _normComuna(part).replace(/\d+/g, " ").replace(/\s+/g, " ").trim();
+        const hit = _COMUNA_LOOKUP.get(cleaned);
+        if (hit) return hit;
+    }
+    return "";
+}
+
+// Hasta 3 imágenes por publicación. La PRIMERA se usa para el análisis de IA.
+app.post('/api/create-post-with-analysis', upload.array('imageFiles', 3), async (req, res) => {
     try {
-        const imageFile = req.file;
-        if (!imageFile) {
+        const imageFiles = req.files;
+        if (!imageFiles || imageFiles.length === 0) {
             return res.status(400).json({ error: 'No se ha subido ningún archivo de imagen.' });
         }
+        const primary = imageFiles[0]; // la imagen principal alimenta la IA
 
-        console.log("Analizando imagen de la nueva publicación...");
-        const { labels, colors } = await analyzeImage(imageFile.buffer);
+        console.log(`Analizando imagen principal (de ${imageFiles.length}) de la nueva publicación...`);
+        const { labels, colors } = await analyzeImage(primary.buffer);
         const ai_tags = buildAiTags({ labels, colors });
 
        console.log("Etiquetas de IA generadas (especie/raza/color):", ai_tags);
@@ -189,41 +216,35 @@ app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (re
         // bloquear la creación del post. Se guarda más abajo con un update aparte.
         let embedding = null;
         try {
-            embedding = JSON.stringify(await getImageEmbedding(imageFile.buffer));
+            embedding = JSON.stringify(await getImageEmbedding(primary.buffer));
             console.log("Embedding generado ✔");
         } catch (e) {
             console.error("Embedding no generado (se crea el post igual):", e.message);
         }
 
-        // --- Subir la imagen a Appwrite Storage ---
-        console.log("Subiendo imagen a Appwrite Storage...");
-        // 3. Creamos un archivo a partir del buffer de la imagen
-        // El nuevo método es más simple: pasamos el buffer y el nombre directamente.
-        const fileToUpload = InputFile.fromBuffer(
-            imageFile.buffer,
-            imageFile.originalname
-        );
-        
-        // 4. Subimos el archivo al bucket
-        const uploadedFile = await appwriteStorage.createFile(
-            process.env.APPWRITE_STORAGE_BUCKET_ID,
-            ID.unique(), // Appwrite genera un ID único para el archivo
-            fileToUpload
-        );
-        console.log("Archivo subido con éxito:", uploadedFile);
-        
-        // 5. Obtenemos la URL pública para ver la imagen
-        const imageUrlResult = appwriteStorage.getFileView(
-            process.env.APPWRITE_STORAGE_BUCKET_ID,
-            uploadedFile.$id // Usamos el ID del archivo que acabamos de subir
-        );
-        const imageUrl = `${process.env.APPWRITE_ENDPOINT}/storage/buckets/${process.env.APPWRITE_STORAGE_BUCKET_ID}/files/${uploadedFile.$id}/view?project=${process.env.APPWRITE_PROJECT_ID}`;
-        console.log("   => URL generada:", imageUrl);
-        
+        // --- Subir TODAS las imágenes a Appwrite Storage ---
+        console.log(`Subiendo ${imageFiles.length} imagen(es) a Appwrite Storage...`);
+        const imageIds = [];
+        const imageUrls = [];
+        for (const f of imageFiles) {
+            const fileToUpload = InputFile.fromBuffer(f.buffer, f.originalname);
+            const uploaded = await appwriteStorage.createFile(
+                process.env.APPWRITE_STORAGE_BUCKET_ID,
+                ID.unique(),
+                fileToUpload
+            );
+            imageIds.push(uploaded.$id);
+            imageUrls.push(
+                `${process.env.APPWRITE_ENDPOINT}/storage/buckets/${process.env.APPWRITE_STORAGE_BUCKET_ID}/files/${uploaded.$id}/view?project=${process.env.APPWRITE_PROJECT_ID}`
+            );
+        }
+        console.log(`   => ${imageUrls.length} URL(s) generada(s)`);
+
         const postData = {
             creator: req.body.creator,
             caption: req.body.caption,
             location: req.body.location,
+            comuna: detectComuna(req.body.location), // zona (comuna del Biobío)
             mascota: req.body.mascota,
             especie: req.body.especie,
             sexo: req.body.sexo,
@@ -231,8 +252,8 @@ app.post('/api/create-post-with-analysis', upload.single('imageFile'), async (re
             size: req.body.size,
             contacto: req.body.contacto,
             tags: [req.body.tags], // Este es el estado: "encontrado", "perdido", etc.
-            imageIds: [uploadedFile.$id],
-            imageUrls: [imageUrl],
+            imageIds,
+            imageUrls,
             ai_tags: ai_tags,
         };
         console.log("Creando documento principal en 'Posts'...");
