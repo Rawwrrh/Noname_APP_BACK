@@ -53,12 +53,14 @@ const ANIMAL_RELATED_TAGS = [
 // Mapa a especie "canónica": permite saber si dos animales son del MISMO tipo.
 // Incluye términos en inglés (de Rekognition) y en español (campo `especie` de los posts).
 const SPECIES_MAP = {
-  dog: 'dog', puppy: 'dog', canine: 'dog',
-  cat: 'cat', kitten: 'cat', feline: 'cat',
-  rabbit: 'rabbit', bunny: 'rabbit', conejo: 'rabbit',
-  hamster: 'hamster',
+  // Categorías nuevas (Canina/Felina/Ave/Roedor) + términos en inglés de Rekognition
+  // + valores antiguos (perro/gato/...) para compatibilidad con posts viejos.
+  dog: 'dog', puppy: 'dog', canine: 'dog', perro: 'dog', canina: 'dog',
+  cat: 'cat', kitten: 'cat', feline: 'cat', gato: 'cat', felina: 'cat',
   bird: 'bird', ave: 'bird', pajaro: 'bird',
-  perro: 'dog', gato: 'cat',
+  // Roedor agrupa roedores; incluimos conejo (coloquialmente en esa categoría).
+  rodent: 'rodent', roedor: 'rodent', hamster: 'rodent', rat: 'rodent', mouse: 'rodent',
+  rabbit: 'rodent', bunny: 'rodent', conejo: 'rodent',
 };
 
 // Colores básicos que devuelve Rekognition (SimplifiedColor) y que usamos como etiqueta.
