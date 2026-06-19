@@ -11,6 +11,10 @@ const { Client, Databases, Query, ID, Storage } = require('node-appwrite'); // S
 const { InputFile } = require('node-appwrite/file');
 console.log({ Client, Databases, Query, ID, Storage, InputFile });
 
+// Notificaciones push (OneSignal) + geofencing
+const { sendPush } = require('./push');
+const { rMaxKm, distanceKm } = require('./searchRadius');
+
 const app = express();
 // App Runner (y otros hosts) inyectan el puerto por env. En local cae a 5000.
 const PORT = process.env.PORT || 5000;
@@ -41,6 +45,55 @@ const appwriteClient = new Client()
 
 const databases = new Databases(appwriteClient);
 const appwriteStorage = new Storage(appwriteClient);
+
+// Colección de usuarios (para el geofencing). Override por env; fallback al ID conocido.
+const USER_COLLECTION_ID =
+  process.env.APPWRITE_USER_COLLECTION_ID || '6647e0a00035cf6b1518';
+
+// Avisa por push a los usuarios cuya ubicación cae dentro de la zona de búsqueda
+// (R_max) de una mascota recién reportada como perdida. Best-effort: si falla
+// (faltan atributos lat/lng o índices en Users), no rompe la creación del post.
+async function notifyNearbyUsers({ lat, lng, factors, postId, mascota, creatorId }) {
+  try {
+    const r = rMaxKm(factors); // km
+    if (!r || r <= 0) return;
+    const dLat = r / 111;
+    const dLng = r / (111 * Math.cos((lat * Math.PI) / 180));
+
+    const users = await databases.listDocuments(
+      process.env.APPWRITE_DATABASE_ID,
+      USER_COLLECTION_ID,
+      [
+        Query.between('lat', lat - dLat, lat + dLat),
+        Query.between('lng', lng - dLng, lng + dLng),
+        Query.limit(500),
+      ]
+    );
+
+    const targets = users.documents
+      .filter(
+        (u) =>
+          u.$id !== creatorId &&
+          typeof u.lat === 'number' &&
+          typeof u.lng === 'number' &&
+          distanceKm(lat, lng, u.lat, u.lng) <= r
+      )
+      .map((u) => u.$id);
+
+    if (targets.length === 0) {
+      console.log('Geofencing: sin usuarios en rango.');
+      return;
+    }
+    await sendPush(targets, {
+      title: 'Mascota perdida cerca de ti 🐾',
+      body: `Se perdió ${mascota || 'una mascota'} en tu zona. ¿La has visto?`,
+      data: { postId, type: 'lost_nearby' },
+    });
+    console.log(`Geofencing: avisados ${targets.length} usuario(s) en ~${r.toFixed(1)}km.`);
+  } catch (e) {
+    console.log('notifyNearbyUsers (geofencing) omitido:', e.message);
+  }
+}
 
 const ANIMAL_RELATED_TAGS = [
   'Animal', 'Pet', 'Dog', 'Puppy', 'Cat', 'Kitten', 'Mammal',
@@ -200,6 +253,28 @@ function detectComuna(location) {
 }
 
 // Hasta 3 imágenes por publicación. La PRIMERA se usa para el análisis de IA.
+// Push directo a un usuario (ej: "alguien vio tu mascota"). Lo llama el front
+// después de crear la notificación in-app, con el $id del destinatario.
+app.post('/api/send-push', async (req, res) => {
+  try {
+    const { externalUserIds, userId, title, body, data } = req.body || {};
+    const ids = Array.isArray(externalUserIds)
+      ? externalUserIds
+      : userId
+      ? [userId]
+      : [];
+    await sendPush(ids, {
+      title: title || 'Camada',
+      body: body || '',
+      data: data || {},
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('send-push error:', e.message);
+    res.status(500).json({ error: 'No se pudo enviar el push.' });
+  }
+});
+
 app.post('/api/create-post-with-analysis', upload.array('imageFiles', 3), async (req, res) => {
     try {
         const imageFiles = req.files;
@@ -305,6 +380,27 @@ app.post('/api/create-post-with-analysis', upload.array('imageFiles', 3), async 
         );
         console.log("Detalles del post guardados con éxito.");
         res.status(201).json(newPost);
+
+        // Geofencing (best-effort, tras responder): si es PERDIDO y trae coords,
+        // avisamos por push a los usuarios cuya ubicación cae en la zona de búsqueda.
+        if (String(req.body.tags).toLowerCase() === 'perdido' && req.body.lat && req.body.lng) {
+            notifyNearbyUsers({
+                lat: Number(req.body.lat),
+                lng: Number(req.body.lng),
+                factors: {
+                    especie: req.body.especie,
+                    size: req.body.size,
+                    sexo: req.body.sexo,
+                    esterilizado: req.body.esterilizado === 'true',
+                    temperamento: req.body.temperamento,
+                    terreno: req.body.terreno,
+                    dob: req.body.dob,
+                },
+                postId: newPost.$id,
+                mascota: req.body.mascota,
+                creatorId: req.body.creator,
+            }).catch((e) => console.log('geofencing fire-and-forget:', e.message));
+        }
 
     } catch (error) {
         console.error("Error al crear la publicación:", error);
